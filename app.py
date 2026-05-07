@@ -1,50 +1,74 @@
 import os
+import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-from openai import OpenAI
 
 app = Flask(__name__)
 
-# Configura tu API Key mediante variables de entorno (más seguro)
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+# CONFIGURACIÓN: Ahora las sacamos de las variables de entorno de Render
+# Si no las encuentra, pondrá un mensaje de error
+API_KEY = os.environ.get("VERCEL_API_KEY")
+URL = "https://ai-gateway.vercel.sh/v1/chat/completions"
 
-# Definición de la identidad de la IA
+# Memoria por usuario (Número de teléfono)
+user_memory = {}
+
 SYSTEM_PROMPT = """
-Eres StarIA, una inteligencia artificial avanzada diseñada para WhatsApp. 
-Fuiste creada y fundada por Forrester Studio, cuyo dueño y fundador es Oscar Rafael.
-Tu personalidad:
-- Eres profesional pero cercana, con un toque tecnológico e innovador.
-- Si te preguntan tu nombre, respondes que eres StarIA.
-- Si preguntan quién te creó o fundó, mencionas orgullosamente a Forrester Studio y a Oscar Rafael.
-- Hablas con seguridad y siempre buscas ayudar al usuario con sus dudas.
+Eres StarIA, una IA avanzada creada por Forrester Studio.
+Tu fundador es Oscar Rafael. Hablas de forma innovadora, técnica y cercana ('brou').
+Mantén el hilo de la conversación y ayuda en todo lo que puedas.
 """
 
 @app.route("/whatsapp", methods=['POST'])
 def whatsapp_reply():
-    incoming_msg = request.values.get('Body', '')
+    user_id = request.values.get('From', '')
+    user_msg = request.values.get('Body', '')
+
+    if not API_KEY:
+        return "Error: No se configuró la VERCEL_API_KEY en Render."
+
+    # Gestión de memoria
+    if user_id not in user_memory:
+        user_memory[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     
+    user_memory[user_id].append({"role": "user", "content": user_msg})
+    
+    # Mantener System + últimos 10 mensajes
+    if len(user_memory[user_id]) > 11:
+        user_memory[user_id] = [user_memory[user_id][0]] + user_memory[user_id][-10:]
+
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": "openai/gpt-4o-mini",
+        "messages": user_memory[user_id]
+    }
+
     try:
-        # Llamada a la API con el contexto de StarIA
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": incoming_msg}
-            ]
-        )
-        ai_text = response.choices[0].message.content
+        response = requests.post(URL, headers=headers, json=data)
+        if response.status_code == 200:
+            result = response.json()
+            ai_reply = result['choices'][0]['message']['content']
+            user_memory[user_id].append({"role": "assistant", "content": ai_reply})
+        else:
+            ai_reply = "Hubo un detalle con mi conexión a Vercel, brou. ¿Reintentamos?"
+            print(f"Error Vercel: {response.text}")
     except Exception as e:
-        ai_text = "Lo siento, brou, tuve un pequeño error técnico. ¿Podemos intentar de nuevo?"
-        print(f"Error: {e}")
+        ai_reply = "Error de conexión en el server. Avisale a Oscar Rafael."
+        print(f"Error Conexión: {e}")
 
-    # Respuesta formato TwiML para Twilio
-    twilio_resp = MessagingResponse()
-    msg = twilio_resp.message()
-    msg.body(ai_text)
+    resp = MessagingResponse()
+    resp.message(ai_reply)
+    return str(resp)
 
-    return str(twilio_resp)
+@app.route("/", methods=['GET'])
+def health():
+    return "<h1>StarIA Online</h1><p>Forrester Studio en control.</p>"
 
 if __name__ == "__main__":
-    # El puerto debe ser dinámico para servidores como Render o Railway
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
+    
