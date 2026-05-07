@@ -2,4 +2,4 @@ flask
 requests
 twilio
 gunicorn
-pymongo[srv
+pymongo[srv]
