@@ -2,82 +2,59 @@ import os
 import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from pymongo import MongoClient
 
 app = Flask(__name__)
 
 # CONFIGURACIÓN
 API_KEY = os.environ.get("VERCEL_API_KEY")
+MONGO_URI = os.environ.get("MONGO_URI")
 URL_GATEWAY = "https://ai-gateway.vercel.sh/v1/chat/completions"
 
-user_memory = {}
+# Conexión a MongoDB
+client = MongoClient(MONGO_URI)
+db = client.staria_db
+chats = db.history
 
-SYSTEM_PROMPT = """
-Eres StarIA, una IA avanzada creada por Forrester Studio.
-Tu fundador es Oscar Rafael. 
-Hablas de forma innovadora y cercana (estilo 'brou').
-"""
-
-def build_twiml(message: str):
-    """Helper para siempre devolver un TwiML válido."""
-    twiml = MessagingResponse()
-    twiml.message(message)
-    resp = app.make_response(str(twiml))
-    resp.headers['Content-Type'] = 'text/xml'
-    return resp
+SYSTEM_PROMPT = "Eres StarIA, una IA creada por Forrester Studio por Oscar Rafael..."
 
 @app.route("/whatsapp", methods=['POST'])
 def whatsapp_reply():
+    user_id = request.values.get('From', 'unknown')
+    user_msg = request.values.get('Body', '')
+
+    # 1. Recuperar historial de la DB
+    doc = chats.find_one({"user_id": user_id})
+    if doc:
+        messages = doc["messages"]
+    else:
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # 2. Agregar mensaje del usuario y consultar IA
+    messages.append({"role": "user", "content": user_msg})
+    
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    payload = {"model": "openai/gpt-4o-mini", "messages": messages[-10:]}
+
     try:
-        user_id = request.values.get('From', '')
-        user_msg = request.values.get('Body', '').strip()
+        response = requests.post(URL_GATEWAY, headers=headers, json=payload)
+        ai_reply = response.json()['choices'][0]['message']['content']
+    except:
+        ai_reply = "Brou, tuve un error de conexión."
 
-        if not user_msg:
-            return build_twiml("No recibí ningún mensaje, brou.")
+    # 3. Guardar historial actualizado
+    messages.append({"role": "assistant", "content": ai_reply})
+    chats.update_one({"user_id": user_id}, {"$set": {"messages": messages}}, upsert=True)
 
-        if not API_KEY:
-            return build_twiml("Falta la VERCEL_API_KEY en las variables de entorno de Render.")
-
-        # Memoria por usuario
-        if user_id not in user_memory:
-            user_memory[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-        user_memory[user_id].append({"role": "user", "content": user_msg})
-
-        # Limitar historial a últimos 10 mensajes + system prompt
-        if len(user_memory[user_id]) > 11:
-            user_memory[user_id] = [user_memory[user_id][0]] + user_memory[user_id][-10:]
-
-        headers = {
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": "openai/gpt-4o-mini",
-            "messages": user_memory[user_id]
-        }
-
-        response = requests.post(URL_GATEWAY, headers=headers, json=payload, timeout=20)
-
-        if response.status_code == 200:
-            result = response.json()
-            ai_reply = result['choices'][0]['message']['content']
-            user_memory[user_id].append({"role": "assistant", "content": ai_reply})
-        else:
-            # Mostrar el error real para poder debuggear
-            ai_reply = f"Error del gateway ({response.status_code}): {response.text[:200]}"
-
-    except requests.exceptions.Timeout:
-        ai_reply = "La IA tardó demasiado en responder, intenta de nuevo brou."
-    except Exception as e:
-        ai_reply = f"Error inesperado: {str(e)}"
-
-    return build_twiml(ai_reply)
+    twiml = MessagingResponse()
+    twiml.message(ai_reply)
+    return str(twiml)
 
 @app.route("/", methods=['GET'])
 def home():
-    return "<h1>StarIA de Forrester Studio — Online ✅</h1>"
+    return "<h1>StarIA con Memoria DB Activa</h1>"
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000)) # Render suele usar el 10000
     app.run(host='0.0.0.0', port=port)
+    
