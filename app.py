@@ -4,10 +4,9 @@ from flask import Flask, request, jsonify
 from twilio.twiml.messaging_response import MessagingResponse
 from pymongo import MongoClient
 
-# 1. PRIMERO CREAMOS LA APP
 app = Flask(__name__)
 
-# 2. CONFIGURACIÓN (Variables de entorno)
+# --- CONFIGURACIÓN ---
 API_KEY = os.environ.get("VERCEL_API_KEY")
 MONGO_URI = os.environ.get("MONGO_URI")
 URL_GATEWAY = "https://ai-gateway.vercel.sh/v1/chat/completions"
@@ -16,10 +15,16 @@ SYSTEM_PROMPT = """
 Eres StarIA, una IA experta en programación creada por Forrester Studio.
 Tu fundador es Oscar Rafael.
 Hablas de forma innovadora y cercana (estilo 'brou').
-Tu objetivo es ayudar a devs a programar mejor.
+Tu objetivo es ayudar a desarrolladores a programar mejor.
 """
 
-# Conexión a MongoDB
+# Mapeo de modelos personalizados
+MODEL_MAP = {
+    "forrester/Star": "openai/gpt-4o-mini",
+    "forrester/Star-turbo": "openai/gpt-4o",
+    "forrester/Star-coder": "deepseek/deepseek-coder"
+}
+
 _mongo_client = None
 _db = None
 
@@ -27,7 +32,7 @@ def get_db():
     global _mongo_client, _db
     if _db is None:
         if not MONGO_URI:
-            raise Exception("Falta MONGO_URI en Render")
+            raise Exception("MONGO_URI no configurada")
         _mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         _db = _mongo_client.staria_db.history
     return _db
@@ -39,31 +44,10 @@ def build_twiml(message: str):
     resp.headers['Content-Type'] = 'text/xml'
     return resp
 
-# --- RUTA PARA LA TERMINAL (CLI) ---
-@app.route("/chat", methods=['POST'])
-def chat_api():
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-        
-    user_msg = data.get("mensaje", "")
-    user_id = data.get("user_id", "terminal_user")
-
-    # Lógica de respuesta (puedes mover esto a una función para no repetir)
-    respuesta = procesar_ia(user_id, user_msg)
-    return jsonify({"respuesta": respuesta})
-
-# --- RUTA PARA WHATSAPP (TWILIO) ---
-@app.route("/whatsapp", methods=['POST'])
-def whatsapp_reply():
-    user_id = request.values.get('From', 'unknown')
-    user_msg = request.values.get('Body', '')
+def procesar_ia(user_id, user_msg, modelo_personalizado):
+    # Traducir el nombre del modelo al real, si no existe usa el básico
+    modelo_real = MODEL_MAP.get(modelo_personalizado, "openai/gpt-4o-mini")
     
-    ai_reply = procesar_ia(user_id, user_msg)
-    return build_twiml(ai_reply)
-
-def procesar_ia(user_id, user_msg):
-    """Función central para manejar la IA y la memoria"""
     try:
         chats = get_db()
         doc = chats.find_one({"user_id": user_id})
@@ -73,19 +57,23 @@ def procesar_ia(user_id, user_msg):
 
     messages.append({"role": "user", "content": user_msg})
     
-    # Mantener historial corto
+    # Limitar historial
     if len(messages) > 11:
         messages = [messages[0]] + messages[-10:]
 
     try:
         headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-        payload = {"model": "openai/gpt-4o-mini", "messages": messages}
-        response = requests.post(URL_GATEWAY, headers=headers, json=payload, timeout=20)
+        payload = {
+            "model": modelo_real, 
+            "messages": messages,
+            "temperature": 0.3
+        }
+        response = requests.post(URL_GATEWAY, headers=headers, json=payload, timeout=25)
         
         if response.status_code == 200:
             ai_reply = response.json()['choices'][0]['message']['content']
         else:
-            ai_reply = "Brou, hubo un error con la IA. Intenta de nuevo."
+            ai_reply = f"Brou, hubo un error técnico ({response.status_code}). Avisale a Oscar Rafael."
     except:
         ai_reply = "Error de conexión con el cerebro de StarIA."
 
@@ -98,11 +86,33 @@ def procesar_ia(user_id, user_msg):
 
     return ai_reply
 
-@app.route("/", methods=['GET'])
+# --- RUTA PARA LA TERMINAL (CLI) ---
+@app.route("/chat", methods=['POST'])
+def chat_api():
+    data = request.get_json()
+    if not data: return jsonify({"error": "No data"}), 400
+    
+    user_msg = data.get("mensaje", "")
+    user_id = data.get("user_id", "terminal_user")
+    modelo_personalizado = data.get("modelo", "forrester/Star")
+
+    respuesta = procesar_ia(user_id, user_msg, modelo_personalizado)
+    return jsonify({"respuesta": respuesta})
+
+# --- RUTA PARA WHATSAPP ---
+@app.route("/whatsapp", methods=['POST'])
+def whatsapp_reply():
+    user_id = request.values.get('From', 'unknown')
+    user_msg = request.values.get('Body', '')
+    # WhatsApp siempre usa el modelo base por ahora
+    ai_reply = procesar_ia(user_id, user_msg, "forrester/Star")
+    return build_twiml(ai_reply)
+
+@app.route("/")
 def home():
-    return "<h1>Servidor StarIA Activo</h1><p>Forrester Studio - AI CLI & WhatsApp</p>"
+    return "<h1>StarIA Server de Forrester Studio Activo</h1>"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
-            
+                                 
